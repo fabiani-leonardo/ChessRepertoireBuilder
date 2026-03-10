@@ -2,18 +2,23 @@ import pygame
 import sys
 import chess
 import chess.engine
+import chess.pgn # Nuova libreria per leggere i file PGN
 import json
 import os
 import random
+import tkinter as tk
+from tkinter import filedialog
 
 # --- INIZIALIZZAZIONE ---
 pygame.init()
 pygame.font.init()
+pygame.mixer.init() # Inizializziamo l'audio
 
 # --- COSTANTI & IMPOSTAZIONI ---
+LARGHEZZA_BARRA = 30 # Spazio per la barra di valutazione
 LARGHEZZA_SCACCHIERA = 640
 LARGHEZZA_PANNELLO = 300
-WIDTH = LARGHEZZA_SCACCHIERA + LARGHEZZA_PANNELLO
+WIDTH = LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + LARGHEZZA_PANNELLO
 HEIGHT = 640
 DIM_CASA = LARGHEZZA_SCACCHIERA // 8
 
@@ -23,22 +28,24 @@ COLORE_SFONDO = (40, 40, 40)
 COLORE_PANNELLO = (30, 30, 30)
 COLORE_TESTO = (255, 255, 255)
 COLORE_EVIDENZIA = (0, 255, 0)
+COLORE_ULTIMA_MOSSA = (255, 255, 0) # Giallo
 
 NOME_FILE_STOCKFISH = "stockfish-windows-x86-64-avx2.exe" 
 FILE_REPERTORIO = "repertorio.json"
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Chessbook Clone - Albero Varianti")
+pygame.display.set_caption("Chessbook Clone - Ultimate Edition")
 
 font_menu = pygame.font.SysFont("arial", 40, bold=True)
 font_testo = pygame.font.SysFont("arial", 20)
 font_piccolo = pygame.font.SysFont("arial", 16)
 
 IMAGES = {}
+SUONI = {}
 repertori = {"Bianco": {}, "Nero": {}}
 
-# --- FUNZIONI DI BASE ---
-def carica_immagini():
+# --- FUNZIONI DI CARICAMENTO ---
+def carica_asset():
     pezzi = {
         'P': 'wP', 'N': 'wN', 'B': 'wB', 'R': 'wR', 'Q': 'wQ', 'K': 'wK',
         'p': 'bP', 'n': 'bN', 'b': 'bB', 'r': 'bR', 'q': 'bQ', 'k': 'bK'
@@ -47,61 +54,129 @@ def carica_immagini():
         try:
             img = pygame.image.load(f"images/{nome_file}.png")
             IMAGES[simbolo] = pygame.transform.scale(img, (DIM_CASA, DIM_CASA))
+        except: pass
+    
+    # Caricamento suoni sicuri
+    file_suoni = {'muovi': 'move.wav', 'cattura': 'capture.mp3', 'errore': 'error.mp3'}
+    for nome, file in file_suoni.items():
+        try:
+            SUONI[nome] = pygame.mixer.Sound(f"sounds/{file}")
         except:
-            pass
+            SUONI[nome] = None # Fallback se non ci sono i file
+
+def riproduci_suono(tipo):
+    if SUONI.get(tipo):
+        SUONI[tipo].play()
 
 def carica_repertorio():
     global repertori
     if os.path.exists(FILE_REPERTORIO):
         with open(FILE_REPERTORIO, "r", encoding="utf-8") as f:
-            dati_salvati = json.load(f)
-            # MIGRAZIONE: Convertiamo le vecchie stringhe in liste
-            for colore in dati_salvati:
-                for fen, mosse in dati_salvati[colore].items():
-                    if isinstance(mosse, str):
-                        dati_salvati[colore][fen] = [mosse]
-            repertori = dati_salvati
+            dati = json.load(f)
+            for colore in dati:
+                for fen, mosse in dati[colore].items():
+                    if isinstance(mosse, str): dati[colore][fen] = [mosse]
+            repertori = dati
 
 def salva_repertorio():
     with open(FILE_REPERTORIO, "w", encoding="utf-8") as f:
         json.dump(repertori, f, indent=4)
 
+def importa_pgn(colore_scelto):
+    """Apre una finestra di dialogo Windows e converte un PGN nel nostro JSON"""
+    root = tk.Tk()
+    root.withdraw() # Nascondiamo la finestra principale di tkinter
+    filepath = filedialog.askopenfilename(title=f"Importa PGN per {colore_scelto}", filetypes=[("File PGN", "*.pgn")])
+    
+    if not filepath:
+        return "Importazione annullata."
+        
+    try:
+        conteggio = 0
+        with open(filepath, "r", encoding="utf-8") as pgn_file:
+            while True:
+                game = chess.pgn.read_game(pgn_file)
+                if game is None: break # Fine del file
+                
+                board = game.board()
+                for mossa in game.mainline_moves():
+                    fen = board.fen()
+                    mossa_san = board.san(mossa)
+                    
+                    # Salviamo la mossa se tocca al colore che stiamo importando
+                    turno_attuale = "Bianco" if board.turn == chess.WHITE else "Nero"
+                    if turno_attuale == colore_scelto:
+                        if fen not in repertori[colore_scelto]:
+                            repertori[colore_scelto][fen] = []
+                        if mossa_san not in repertori[colore_scelto][fen]:
+                            repertori[colore_scelto][fen].append(mossa_san)
+                            conteggio += 1
+                            
+                    board.push(mossa)
+        salva_repertorio()
+        return f"Importate {conteggio} mosse da PGN!"
+    except Exception as e:
+        return f"Errore lettura PGN: {e}"
+
 # --- FUNZIONI GRAFICHE ---
 def disegna_menu():
     screen.fill(COLORE_SFONDO)
     titolo = font_menu.render("CHESSBOOK CLONE", True, COLORE_TESTO)
-    screen.blit(titolo, (WIDTH//2 - titolo.get_width()//2, 50))
+    screen.blit(titolo, (WIDTH//2 - titolo.get_width()//2, 30))
 
     rects = {
-        "MOD_B": pygame.Rect(WIDTH//2 - 200, 150, 400, 50),
-        "MOD_N": pygame.Rect(WIDTH//2 - 200, 220, 400, 50),
-        "ALL_B": pygame.Rect(WIDTH//2 - 200, 320, 400, 50),
-        "ALL_N": pygame.Rect(WIDTH//2 - 200, 390, 400, 50)
+        "MOD_B": pygame.Rect(WIDTH//2 - 200, 100, 400, 50),
+        "MOD_N": pygame.Rect(WIDTH//2 - 200, 170, 400, 50),
+        "ALL_B": pygame.Rect(WIDTH//2 - 200, 250, 400, 50),
+        "ALL_N": pygame.Rect(WIDTH//2 - 200, 320, 400, 50),
+        "PGN_B": pygame.Rect(WIDTH//2 - 200, 420, 190, 40),
+        "PGN_N": pygame.Rect(WIDTH//2 + 10, 420, 190, 40)
     }
     
     pygame.draw.rect(screen, (70, 130, 180), rects["MOD_B"], border_radius=10)
     pygame.draw.rect(screen, (50, 100, 150), rects["MOD_N"], border_radius=10)
     pygame.draw.rect(screen, (46, 139, 87), rects["ALL_B"], border_radius=10)
     pygame.draw.rect(screen, (34, 100, 60), rects["ALL_N"], border_radius=10)
+    pygame.draw.rect(screen, (100, 100, 100), rects["PGN_B"], border_radius=5)
+    pygame.draw.rect(screen, (80, 80, 80), rects["PGN_N"], border_radius=5)
     
     testi = {
-        "MOD_B": "1. Modifica Repertorio - BIANCO",
-        "MOD_N": "2. Modifica Repertorio - NERO",
-        "ALL_B": "3. Allenati - BIANCO",
-        "ALL_N": "4. Allenati - NERO"
+        "MOD_B": "1. Modifica Repertorio - BIANCO", "MOD_N": "2. Modifica Repertorio - NERO",
+        "ALL_B": "3. Allenati - BIANCO", "ALL_N": "4. Allenati - NERO",
+        "PGN_B": "Importa PGN (Bianco)", "PGN_N": "Importa PGN (Nero)"
     }
     
     for chiave, rect in rects.items():
-        t = font_testo.render(testi[chiave], True, COLORE_TESTO)
+        font_da_usare = font_piccolo if "PGN" in chiave else font_testo
+        t = font_da_usare.render(testi[chiave], True, COLORE_TESTO)
         screen.blit(t, (rect.centerx - t.get_width()//2, rect.centery - t.get_height()//2))
         
     return rects
+
+def disegna_barra_valutazione(score_cp, orientamento_bianco):
+    # score_cp è in centipawns dal punto di vista del BIANCO.
+    # Cap a +1000 e -1000 centipawns (10 pedoni di vantaggio) per evitare che schizzi fuori
+    score_cp = max(-1000, min(1000, score_cp))
+    
+    # 0 = pari (metà schermo). +1000 = tutto bianco (y=0). -1000 = tutto nero (y=HEIGHT)
+    percentuale_bianco = (score_cp + 1000) / 2000.0 
+    
+    if not orientamento_bianco:
+        percentuale_bianco = 1.0 - percentuale_bianco # Ribaltiamo la barra se giochiamo col nero!
+        
+    altezza_bianco = int(HEIGHT * percentuale_bianco)
+    altezza_nero = HEIGHT - altezza_bianco
+    
+    # Disegniamo la parte nera in alto e bianca in basso (o viceversa in base all'orientamento)
+    pygame.draw.rect(screen, (50, 50, 50), pygame.Rect(0, 0, LARGHEZZA_BARRA, altezza_nero))
+    pygame.draw.rect(screen, (220, 220, 220), pygame.Rect(0, altezza_nero, LARGHEZZA_BARRA, altezza_bianco))
 
 def disegna_scacchiera():
     for riga in range(8):
         for colonna in range(8):
             colore = COLORE_CHIARO if (riga + colonna) % 2 == 0 else COLORE_SCURO
-            pygame.draw.rect(screen, colore, pygame.Rect(colonna * DIM_CASA, riga * DIM_CASA, DIM_CASA, DIM_CASA))
+            # Aggiungiamo LARGHEZZA_BARRA alla coordinata X
+            pygame.draw.rect(screen, colore, pygame.Rect(LARGHEZZA_BARRA + colonna * DIM_CASA, riga * DIM_CASA, DIM_CASA, DIM_CASA))
 
 def disegna_pezzi(board, orientamento_bianco=True):
     for square in chess.SQUARES:
@@ -111,66 +186,79 @@ def disegna_pezzi(board, orientamento_bianco=True):
             riga = chess.square_rank(square)
             x = colonna if orientamento_bianco else 7 - colonna
             y = 7 - riga if orientamento_bianco else riga
-            screen.blit(IMAGES[pezzo.symbol()], pygame.Rect(x * DIM_CASA, y * DIM_CASA, DIM_CASA, DIM_CASA))
+            screen.blit(IMAGES[pezzo.symbol()], pygame.Rect(LARGHEZZA_BARRA + x * DIM_CASA, y * DIM_CASA, DIM_CASA, DIM_CASA))
 
-def disegna_evidenziazione(casa, orientamento_bianco=True):
-    if casa is not None:
-        colonna = chess.square_file(casa)
-        riga = chess.square_rank(casa)
+def disegna_evidenziazioni(board, casa_selezionata, orientamento_bianco=True):
+    # 1. Evidenzia l'ultima mossa giocata (Giallo trasparente)
+    if len(board.move_stack) > 0:
+        ultima_mossa = board.peek()
+        for casa in [ultima_mossa.from_square, ultima_mossa.to_square]:
+            colonna = chess.square_file(casa)
+            riga = chess.square_rank(casa)
+            x = colonna if orientamento_bianco else 7 - colonna
+            y = 7 - riga if orientamento_bianco else riga
+            s = pygame.Surface((DIM_CASA, DIM_CASA))
+            s.set_alpha(80)
+            s.fill(COLORE_ULTIMA_MOSSA)
+            screen.blit(s, (LARGHEZZA_BARRA + x * DIM_CASA, y * DIM_CASA))
+            
+    # 2. Evidenzia la casa selezionata dal mouse (Verde)
+    if casa_selezionata is not None:
+        colonna = chess.square_file(casa_selezionata)
+        riga = chess.square_rank(casa_selezionata)
         x = colonna if orientamento_bianco else 7 - colonna
         y = 7 - riga if orientamento_bianco else riga
         s = pygame.Surface((DIM_CASA, DIM_CASA))
         s.set_alpha(100)
         s.fill(COLORE_EVIDENZIA)
-        screen.blit(s, (x * DIM_CASA, y * DIM_CASA))
+        screen.blit(s, (LARGHEZZA_BARRA + x * DIM_CASA, y * DIM_CASA))
 
 def disegna_pannello(stato, board, colore_scelto, top_mosse_testo, msg_sistema):
-    pannello_rect = pygame.Rect(LARGHEZZA_SCACCHIERA, 0, LARGHEZZA_PANNELLO, HEIGHT)
+    pannello_rect = pygame.Rect(LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA, 0, LARGHEZZA_PANNELLO, HEIGHT)
     pygame.draw.rect(screen, COLORE_PANNELLO, pannello_rect)
     
     titolo = font_testo.render(f"Modo: {stato} ({colore_scelto})", True, (255, 215, 0))
-    screen.blit(titolo, (LARGHEZZA_SCACCHIERA + 20, 20))
+    screen.blit(titolo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 20))
     
     fen = board.fen()
-    
-    # NOVITÀ: Estraiamo la lista delle mosse e le uniamo con una virgola
     mosse_salvate = repertori[colore_scelto].get(fen, [])
     testo_salvate = ", ".join(mosse_salvate) if mosse_salvate else "Nessuna"
     
     if stato == "MODIFICA":
         rep_testo = font_testo.render(f"Salvate: {testo_salvate}", True, (100, 255, 100) if mosse_salvate else (200, 200, 200))
-        screen.blit(rep_testo, (LARGHEZZA_SCACCHIERA + 20, 60))
+        screen.blit(rep_testo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 60))
         
         sf_titolo = font_testo.render("Analisi Stockfish:", True, (150, 200, 255))
-        screen.blit(sf_titolo, (LARGHEZZA_SCACCHIERA + 20, 120))
+        screen.blit(sf_titolo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 120))
         for i, riga in enumerate(top_mosse_testo):
             testo_mossa = font_piccolo.render(riga, True, COLORE_TESTO)
-            screen.blit(testo_mossa, (LARGHEZZA_SCACCHIERA + 20, 160 + (i * 25)))
+            screen.blit(testo_mossa, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 160 + (i * 25)))
             
         istruzioni = ["[Click] Muovi", "[S] Salva mossa", "[R] Reset mosse qui", "[Backspace] Indietro", "[Esc] Menu"]
     else:
         info_testo = font_testo.render("Indovina la mossa!", True, (150, 255, 150))
-        screen.blit(info_testo, (LARGHEZZA_SCACCHIERA + 20, 120))
+        screen.blit(info_testo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 120))
         istruzioni = ["[Click] Fai la mossa", "[H] Aiuto (Hint)", "[Esc] Menu"]
 
-    pygame.draw.line(screen, (100, 100, 100), (LARGHEZZA_SCACCHIERA + 20, 450), (WIDTH - 20, 450))
+    pygame.draw.line(screen, (100, 100, 100), (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 450), (WIDTH - 20, 450))
     for i, riga in enumerate(istruzioni):
         testo = font_piccolo.render(riga, True, (180, 180, 180))
-        screen.blit(testo, (LARGHEZZA_SCACCHIERA + 20, 470 + (i * 25)))
+        screen.blit(testo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 470 + (i * 25)))
         
     if msg_sistema:
         msg_render = font_testo.render(msg_sistema, True, (255, 100, 100))
-        screen.blit(msg_render, (LARGHEZZA_SCACCHIERA + 20, HEIGHT - 50))
+        screen.blit(msg_render, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, HEIGHT - 50))
 
 def ottieni_casa(x, y, orientamento_bianco):
-    if x >= LARGHEZZA_SCACCHIERA: return None
-    colonna = x // DIM_CASA
+    x_scacchiera = x - LARGHEZZA_BARRA # Sottraiamo l'offset della barra
+    if x_scacchiera < 0 or x_scacchiera >= LARGHEZZA_SCACCHIERA: return None
+    colonna = x_scacchiera // DIM_CASA
     riga = y // DIM_CASA
     return chess.square(colonna if orientamento_bianco else 7 - colonna, 7 - riga if orientamento_bianco else riga)
 
 # --- CICLO PRINCIPALE ---
 def main():
-    carica_immagini()
+    carica_asset()
     carica_repertorio()
     board = chess.Board()
     
@@ -190,6 +278,7 @@ def main():
     ultimo_fen_analizzato = ""
     top_mosse_testo = ["Calcolando..."]
     msg_sistema = ""
+    valutazione_cp = 0 # Variabile globale per l'altezza della barra
     
     while running:
         if stato_attuale == "ALLENATI":
@@ -204,7 +293,10 @@ def main():
                     board.pop()
                 
                 if mosse_valide:
-                    board.push(random.choice(mosse_valide))
+                    mossa_scelta = random.choice(mosse_valide)
+                    is_cattura = board.is_capture(mossa_scelta)
+                    board.push(mossa_scelta)
+                    riproduci_suono("cattura" if is_cattura else "muovi")
                     msg_sistema = "Tocca a te!"
                 else:
                     msg_sistema = "Fine linea raggiunta!"
@@ -217,6 +309,7 @@ def main():
                 if stato_attuale in ["MODIFICA", "ALLENATI"]:
                     if event.key == pygame.K_ESCAPE:
                         stato_attuale = "MENU"
+                        msg_sistema = ""
                         
                     elif event.key in [pygame.K_LEFT, pygame.K_BACKSPACE] and stato_attuale == "MODIFICA":
                         if len(board.move_stack) > 0:
@@ -230,10 +323,8 @@ def main():
                             fen_precedente = board.fen()
                             mossa_san = board.san(ultima_mossa)
                             
-                            # LOGICA MULTIPLA: Aggiungiamo alla lista invece di sovrascrivere
                             if fen_precedente not in repertori[colore_scelto]:
                                 repertori[colore_scelto][fen_precedente] = []
-                                
                             if mossa_san not in repertori[colore_scelto][fen_precedente]:
                                 repertori[colore_scelto][fen_precedente].append(mossa_san)
                                 msg_sistema = f"Aggiunta: {mossa_san}!"
@@ -244,7 +335,6 @@ def main():
                             board.push(ultima_mossa)
                             
                     elif event.key == pygame.K_r and stato_attuale == "MODIFICA":
-                        # Rimuove l'intera lista per questa posizione
                         fen = board.fen()
                         if fen in repertori[colore_scelto]:
                             del repertori[colore_scelto][fen]
@@ -255,7 +345,6 @@ def main():
                         fen = board.fen()
                         mosse_corr = repertori[colore_scelto].get(fen, [])
                         if mosse_corr:
-                            # Prende la prima lettera di ogni mossa salvata
                             iniziali = ", ".join(list(set(m[0] for m in mosse_corr)))
                             msg_sistema = f"Inizia con: {iniziali}"
                         else:
@@ -275,6 +364,10 @@ def main():
                             colore_scelto, stato_attuale, board, msg_sistema = "Bianco", "ALLENATI", chess.Board(), ""
                         elif rects["ALL_N"].collidepoint(x, y):
                             colore_scelto, stato_attuale, board, msg_sistema = "Nero", "ALLENATI", chess.Board(), ""
+                        elif rects["PGN_B"].collidepoint(x, y):
+                            msg_sistema = importa_pgn("Bianco")
+                        elif rects["PGN_N"].collidepoint(x, y):
+                            msg_sistema = importa_pgn("Nero")
                             
                     elif stato_attuale in ["MODIFICA", "ALLENATI"]:
                         turno_attuale = "Bianco" if board.turn == chess.WHITE else "Nero"
@@ -301,18 +394,20 @@ def main():
                                             mossa = chess.Move(casa_selezionata, casa_cliccata, promotion=chess.QUEEN)
                                     
                                     if mossa in board.legal_moves:
+                                        is_cattura = board.is_capture(mossa)
                                         if stato_attuale == "MODIFICA":
                                             board.push(mossa)
+                                            riproduci_suono("cattura" if is_cattura else "muovi")
                                             msg_sistema = ""
                                         elif stato_attuale == "ALLENATI":
                                             fen = board.fen()
-                                            
-                                            # LOGICA MULTIPLA IN ALLENAMENTO
                                             mosse_corr = repertori[colore_scelto].get(fen, [])
                                             if board.san(mossa) in mosse_corr:
                                                 board.push(mossa)
+                                                riproduci_suono("cattura" if is_cattura else "muovi")
                                                 msg_sistema = "Esatto!"
                                             else:
+                                                riproduci_suono("errore")
                                                 msg_sistema = "Errore, riprova."
                                         casa_selezionata = None
                                     else:
@@ -321,12 +416,19 @@ def main():
         if stato_attuale == "MODIFICA" and board.fen() != ultimo_fen_analizzato:
             ultimo_fen_analizzato = board.fen()
             top_mosse_testo = ["Calcolando..."]
-            disegna_scacchiera()
-            disegna_pannello(stato_attuale, board, colore_scelto, top_mosse_testo, msg_sistema)
-            pygame.display.flip()
             
             infos = engine.analyse(board, chess.engine.Limit(time=0.2), multipv=3)
             top_mosse_testo = []
+            
+            # Estraiamo anche la valutazione per disegnare la barra
+            if infos and "score" in infos[0]:
+                sc = infos[0]["score"].white()
+                if sc.is_mate():
+                    # Se è matto, diamo un valore altissimo alla barra
+                    valutazione_cp = 10000 if sc.mate() > 0 else -10000
+                else:
+                    valutazione_cp = sc.score()
+            
             for i, info in enumerate(infos):
                 if "score" in info and "pv" in info:
                     sc = info["score"].white()
@@ -335,10 +437,15 @@ def main():
 
         if stato_attuale == "MENU":
             disegna_menu()
+            if msg_sistema:
+                # Mostra nel menu quanti PGN sono stati importati
+                msg_render = font_testo.render(msg_sistema, True, (255, 255, 100))
+                screen.blit(msg_render, (WIDTH//2 - msg_render.get_width()//2, HEIGHT - 50))
         else:
             orientamento_bianco = (colore_scelto == "Bianco")
+            disegna_barra_valutazione(valutazione_cp, orientamento_bianco)
             disegna_scacchiera()
-            disegna_evidenziazione(casa_selezionata, orientamento_bianco)
+            disegna_evidenziazioni(board, casa_selezionata, orientamento_bianco)
             disegna_pezzi(board, orientamento_bianco)
             disegna_pannello(stato_attuale, board, colore_scelto, top_mosse_testo, msg_sistema)
             
