@@ -83,38 +83,50 @@ def salva_repertorio():
         json.dump(repertori, f, indent=4)
 
 def importa_pgn(colore_scelto):
-    """Apre una finestra di dialogo Windows e converte un PGN nel nostro JSON"""
+    """Apre una finestra di dialogo Windows e converte un PGN nel nostro JSON, esplorando TUTTE le varianti."""
     root = tk.Tk()
-    root.withdraw() # Nascondiamo la finestra principale di tkinter
+    root.withdraw()
     filepath = filedialog.askopenfilename(title=f"Importa PGN per {colore_scelto}", filetypes=[("File PGN", "*.pgn")])
     
     if not filepath:
         return "Importazione annullata."
         
     try:
-        conteggio = 0
+        conteggio = [0] # Usiamo una lista per tenerne traccia durante la ricorsione
+        
+        # Funzione ricorsiva per esplorare l'intero albero delle varianti
+        def esplora_albero(nodo, board):
+            for figlio in nodo.variations:
+                mossa = figlio.move
+                fen = board.fen()
+                mossa_san = board.san(mossa)
+                
+                # Salviamo la mossa se tocca al colore che stiamo importando
+                turno_attuale = "Bianco" if board.turn == chess.WHITE else "Nero"
+                if turno_attuale == colore_scelto:
+                    if fen not in repertori[colore_scelto]:
+                        repertori[colore_scelto][fen] = []
+                    if mossa_san not in repertori[colore_scelto][fen]:
+                        repertori[colore_scelto][fen].append(mossa_san)
+                        conteggio[0] += 1
+                        
+                # 1. Eseguiamo la mossa sulla scacchiera virtuale
+                board.push(mossa)
+                # 2. Esploriamo tutte le sotto-varianti di questa mossa (Ricorsione)
+                esplora_albero(figlio, board)
+                # 3. Annulliamo la mossa (Backtracking) per passare alla prossima variante
+                board.pop()
+
         with open(filepath, "r", encoding="utf-8") as pgn_file:
             while True:
                 game = chess.pgn.read_game(pgn_file)
                 if game is None: break # Fine del file
                 
                 board = game.board()
-                for mossa in game.mainline_moves():
-                    fen = board.fen()
-                    mossa_san = board.san(mossa)
-                    
-                    # Salviamo la mossa se tocca al colore che stiamo importando
-                    turno_attuale = "Bianco" if board.turn == chess.WHITE else "Nero"
-                    if turno_attuale == colore_scelto:
-                        if fen not in repertori[colore_scelto]:
-                            repertori[colore_scelto][fen] = []
-                        if mossa_san not in repertori[colore_scelto][fen]:
-                            repertori[colore_scelto][fen].append(mossa_san)
-                            conteggio += 1
-                            
-                    board.push(mossa)
+                esplora_albero(game, board) # Avviamo l'esplorazione profonda!
+                
         salva_repertorio()
-        return f"Importate {conteggio} mosse da PGN!"
+        return f"Importate {conteggio[0]} mosse da PGN!"
     except Exception as e:
         return f"Errore lettura PGN: {e}"
 
