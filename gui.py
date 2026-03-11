@@ -2,20 +2,22 @@ import pygame
 import sys
 import chess
 import chess.engine
-import chess.pgn # Library to read PGN files
+import chess.pgn
 import json
 import os
 import random
 import tkinter as tk
 from tkinter import filedialog
+import requests # NUOVA LIBRERIA PER INTERNET
+import threading # NUOVA LIBRERIA PER NON BLOCCARE LA GRAFICA
 
 # --- INITIALIZATION ---
 pygame.init()
 pygame.font.init()
-pygame.mixer.init() # Initialize audio
+pygame.mixer.init()
 
 # --- CONSTANTS & SETTINGS ---
-EVAL_BAR_WIDTH = 30 # Space for the evaluation bar
+EVAL_BAR_WIDTH = 30
 BOARD_WIDTH = 640
 PANEL_WIDTH = 300
 WIDTH = EVAL_BAR_WIDTH + BOARD_WIDTH + PANEL_WIDTH
@@ -28,13 +30,13 @@ BG_COLOR = (40, 40, 40)
 PANEL_COLOR = (30, 30, 30)
 TEXT_COLOR = (255, 255, 255)
 HIGHLIGHT_COLOR = (0, 255, 0)
-LAST_MOVE_COLOR = (255, 255, 0) # Yellow
+LAST_MOVE_COLOR = (255, 255, 0)
 
 STOCKFISH_FILENAME = "stockfish-windows-x86-64-avx2.exe" 
 REPERTOIRE_FILE = "repertoire.json"
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Chessbook Clone - Ultimate Edition")
+pygame.display.set_caption("Chessbook Clone - Database Umano Integrato")
 
 font_menu = pygame.font.SysFont("arial", 40, bold=True)
 font_text = pygame.font.SysFont("arial", 20)
@@ -43,6 +45,61 @@ font_small = pygame.font.SysFont("arial", 16)
 IMAGES = {}
 SOUNDS = {}
 repertoires = {"White": {}, "Black": {}}
+
+# --- LICHESS DATABASE CACHE ---
+lichess_cache = {}
+
+def leggi_token():
+    """Legge il token da file. Se non c'è, restituisce None."""
+    try:
+        if os.path.exists("token.txt"):
+            with open("token.txt", "r") as f:
+                return f.read().strip()
+    except:
+        pass
+    return None
+
+def fetch_lichess_async(fen):
+    """Scarica le statistiche umane da Lichess in background."""
+    mio_token = leggi_token()
+    
+    # Se l'utente non ha messo il file token.txt, avvisiamolo elegantemente
+    if not mio_token:
+        lichess_cache[fen] = ["Manca token.txt", "Crea token su Lichess", "e salvalo nel file!"]
+        return
+
+    try:
+        url = "https://explorer.lichess.ovh/lichess"
+        parametri = {
+            'fen': fen,
+            'speeds': 'blitz,rapid,classical',
+            'moves': 4
+        }
+        
+        headers = {
+            'User-Agent': 'ChessbookClone/1.0',
+            'Authorization': f'Bearer {mio_token}' 
+        }
+        
+        resp = requests.get(url, headers=headers, params=parametri, timeout=5)
+        resp.raise_for_status() 
+        
+        dati = resp.json()
+        
+        totale_partite = dati.get('white', 0) + dati.get('draws', 0) + dati.get('black', 0)
+        mosse_info = []
+        
+        if totale_partite > 0:
+            for m in dati.get('moves', []):
+                m_totale = m['white'] + m['draws'] + m['black']
+                pct = (m_totale / totale_partite) * 100
+                mosse_info.append((m['san'], m_totale, pct))
+                
+        lichess_cache[fen] = mosse_info if mosse_info else ["Nessun dato qui."]
+        
+    except Exception as e:
+        print(f"Errore Lichess API: {e}")
+        lichess_cache[fen] = ["Database offline"]
 
 # --- LOADING FUNCTIONS ---
 def load_assets():
@@ -56,17 +113,15 @@ def load_assets():
             IMAGES[symbol] = pygame.transform.scale(img, (SQUARE_SIZE, SQUARE_SIZE))
         except: pass
     
-    # Safe sound loading
-    sound_files = {'move': 'move.wav', 'capture': 'capture.mp3', 'error': 'error.mp3'}
+    sound_files = {'move': 'move.mp3', 'capture': 'capture.mp3', 'error': 'error.mp3'}
     for name, file in sound_files.items():
         try:
             SOUNDS[name] = pygame.mixer.Sound(f"sounds/{file}")
         except:
-            SOUNDS[name] = None # Fallback if files are missing
+            SOUNDS[name] = None
 
 def play_sound(sound_type):
-    if SOUNDS.get(sound_type):
-        SOUNDS[sound_type].play()
+    if SOUNDS.get(sound_type): SOUNDS[sound_type].play()
 
 def load_repertoire():
     global repertoires
@@ -83,32 +138,25 @@ def save_repertoire():
         json.dump(repertoires, f, indent=4)
 
 def import_pgn(chosen_color):
-    """Opens a Windows dialog and converts a PGN into our JSON, exploring ALL variations."""
     root = tk.Tk()
     root.withdraw()
     filepath = filedialog.askopenfilename(title=f"Import PGN for {chosen_color}", filetypes=[("PGN Files", "*.pgn")])
-    
-    if not filepath:
-        return "Import cancelled."
+    if not filepath: return "Import cancelled."
         
     try:
         count = [0]
-        
         def explore_tree(node, board):
             for child in node.variations:
                 move = child.move
                 fen = board.fen()
                 san_move = board.san(move)
                 
-                # TURN CHECK REMOVED!
-                # We save every single branch of the PGN tree to maintain continuity
                 if fen not in repertoires[chosen_color]:
                     repertoires[chosen_color][fen] = []
                 if san_move not in repertoires[chosen_color][fen]:
                     repertoires[chosen_color][fen].append(san_move)
                     count[0] += 1
                         
-                # Navigate deep
                 board.push(move)
                 explore_tree(child, board)
                 board.pop()
@@ -117,12 +165,11 @@ def import_pgn(chosen_color):
             while True:
                 game = chess.pgn.read_game(pgn_file)
                 if game is None: break
-                
                 board = game.board()
                 explore_tree(game, board)
                 
         save_repertoire()
-        return f"Imported {count[0]} moves (including opponents)!"
+        return f"Imported {count[0]} moves!"
     except Exception as e:
         return f"Error reading PGN: {e}"
 
@@ -162,20 +209,12 @@ def draw_menu():
     return rects
 
 def draw_eval_bar(score_cp, white_orientation):
-    # score_cp is in centipawns from WHITE's perspective.
-    # Cap at +1000 and -1000 centipawns (10 pawns advantage) to prevent overflowing
     score_cp = max(-1000, min(1000, score_cp))
-    
-    # 0 = equal (mid screen). +1000 = all white (y=0). -1000 = all black (y=HEIGHT)
     white_percentage = (score_cp + 1000) / 2000.0 
-    
     if not white_orientation:
-        white_percentage = 1.0 - white_percentage # Flip bar if playing black!
-        
+        white_percentage = 1.0 - white_percentage 
     white_height = int(HEIGHT * white_percentage)
     black_height = HEIGHT - white_height
-    
-    # Draw black part at the top and white at the bottom (or vice versa based on orientation)
     pygame.draw.rect(screen, (50, 50, 50), pygame.Rect(0, 0, EVAL_BAR_WIDTH, black_height))
     pygame.draw.rect(screen, (220, 220, 220), pygame.Rect(0, black_height, EVAL_BAR_WIDTH, white_height))
 
@@ -183,7 +222,6 @@ def draw_board():
     for row in range(8):
         for col in range(8):
             color = LIGHT_COLOR if (row + col) % 2 == 0 else DARK_COLOR
-            # Add EVAL_BAR_WIDTH to the X coordinate
             pygame.draw.rect(screen, color, pygame.Rect(EVAL_BAR_WIDTH + col * SQUARE_SIZE, row * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE))
 
 def draw_pieces(board, white_orientation=True):
@@ -197,7 +235,6 @@ def draw_pieces(board, white_orientation=True):
             screen.blit(IMAGES[piece.symbol()], pygame.Rect(EVAL_BAR_WIDTH + x * SQUARE_SIZE, y * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE))
 
 def draw_highlights(board, selected_square, white_orientation=True):
-    # 1. Highlight the last played move (Transparent yellow)
     if len(board.move_stack) > 0:
         last_move = board.peek()
         for square in [last_move.from_square, last_move.to_square]:
@@ -210,7 +247,6 @@ def draw_highlights(board, selected_square, white_orientation=True):
             s.fill(LAST_MOVE_COLOR)
             screen.blit(s, (EVAL_BAR_WIDTH + x * SQUARE_SIZE, y * SQUARE_SIZE))
             
-    # 2. Highlight the mouse-selected square (Green)
     if selected_square is not None:
         col = chess.square_file(selected_square)
         row = chess.square_rank(selected_square)
@@ -232,62 +268,68 @@ def draw_panel(state, board, chosen_color, top_moves_text, system_msg):
     saved_moves = repertoires[chosen_color].get(fen, [])
     
     if state == "EDIT":
-        # --- MULTILINE LOGIC FOR WORD WRAPPING ---
+        # Impaginazione mosse salvate
         saved_color = (100, 255, 100) if saved_moves else (200, 200, 200)
         full_text = "Saved: " + ", ".join(saved_moves) if saved_moves else "Saved: None"
-            
         words = full_text.split(" ")
-        lines = []
-        current_line = ""
-        max_width = PANEL_WIDTH - 40 # 20px margin per side
+        lines, current_line = [], ""
+        max_width = PANEL_WIDTH - 40 
         
         for word in words:
             test_line = current_line + word + " "
-            # If the test line fits the space, keep it
             if font_text.size(test_line)[0] <= max_width:
                 current_line = test_line
             else:
-                # Otherwise save the line and break to next line
                 lines.append(current_line)
                 current_line = word + " "
-        if current_line:
-            lines.append(current_line)
+        if current_line: lines.append(current_line)
             
-        offset_y = 60 # Starting Y coordinate
+        offset_y = 60
         for line in lines:
             surf = font_text.render(line.strip(), True, saved_color)
             screen.blit(surf, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, offset_y))
-            offset_y += 25 # Drop 25 pixels for the next line
+            offset_y += 25
         
-        # --- END MULTILINE LOGIC ---
-
-        # Move Stockfish down based on the space occupied by saved moves
-        stockfish_offset = max(120, offset_y + 20) 
-        
+        # Disegno Stockfish
+        stockfish_offset = max(110, offset_y + 15) 
         sf_title = font_text.render("Stockfish Analysis:", True, (150, 200, 255))
         screen.blit(sf_title, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, stockfish_offset))
         for i, line in enumerate(top_moves_text):
             move_text = font_small.render(line, True, TEXT_COLOR)
-            screen.blit(move_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, stockfish_offset + 35 + (i * 25)))
-            
-        instructions = ["[Click] Move", "[S] Save move", "[R] Reset moves here", "[Backspace] Undo", "[Esc] Menu"]
+            screen.blit(move_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, stockfish_offset + 30 + (i * 20)))
+
+        # NUOVO: Disegno Lichess Database (sotto Stockfish)
+        lichess_offset = stockfish_offset + 105
+        db_title = font_text.render("Lichess DB (Humans):", True, (255, 180, 100))
+        screen.blit(db_title, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, lichess_offset))
+        
+        db_data = lichess_cache.get(fen, ["Caricamento..."])
+        for i, item in enumerate(db_data[:4]): # Mostriamo max 4 mosse
+            if isinstance(item, tuple): # Se è un dato formattato
+                san, count, pct = item
+                testo = f"{i+1}. {san}  ({pct:.1f}%)"
+            else:
+                testo = item # Messaggio d'errore o caricamento
+            db_text = font_small.render(testo, True, TEXT_COLOR)
+            screen.blit(db_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, lichess_offset + 30 + (i * 20)))
+
+        instructions = ["[Click] Move", "[S] Save", "[R] Reset here", "[Bksp] Undo", "[Esc] Menu"]
     else:
         info_text = font_text.render("Guess the move!", True, (150, 255, 150))
         screen.blit(info_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 120))
         instructions = ["[Click] Make move", "[H] Hint", "[N] New Line", "[Esc] Menu"]
-    
 
-    pygame.draw.line(screen, (100, 100, 100), (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 450), (WIDTH - 20, 450))
+    pygame.draw.line(screen, (100, 100, 100), (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 480), (WIDTH - 20, 480))
     for i, line in enumerate(instructions):
         text = font_small.render(line, True, (180, 180, 180))
-        screen.blit(text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 470 + (i * 25)))
+        screen.blit(text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 495 + (i * 22)))
         
     if system_msg:
         msg_render = font_text.render(system_msg, True, (255, 100, 100))
-        screen.blit(msg_render, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, HEIGHT - 50))
+        screen.blit(msg_render, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, HEIGHT - 40))
 
 def get_square_from_mouse(x, y, white_orientation):
-    board_x = x - EVAL_BAR_WIDTH # Subtract bar offset
+    board_x = x - EVAL_BAR_WIDTH
     if board_x < 0 or board_x >= BOARD_WIDTH: return None
     col = board_x // SQUARE_SIZE
     row = y // SQUARE_SIZE
@@ -315,9 +357,15 @@ def main():
     last_analyzed_fen = ""
     top_moves_text = ["Calculating..."]
     system_msg = ""
-    eval_cp = 0 # Global variable for bar height
+    eval_cp = 0 
     
     while running:
+        fen = board.fen()
+        # Richiesta asincrona del DB Lichess per la posizione attuale
+        if current_state in ["EDIT", "TRAIN"] and fen not in lichess_cache:
+            lichess_cache[fen] = ["Caricamento db..."] # <--- RIGA MAGICA ANTI-SPAM!
+            threading.Thread(target=fetch_lichess_async, args=(fen,), daemon=True).start()
+
         if current_state == "TRAIN":
             current_turn = "White" if board.turn == chess.WHITE else "Black"
             if current_turn != chosen_color:
@@ -330,7 +378,25 @@ def main():
                     board.pop()
                 
                 if valid_moves:
-                    chosen_move = random.choice(valid_moves)
+                    # --- LOGICA DI ALLENAMENTO PONDERATA (Probabilità Lichess) ---
+                    db_data = lichess_cache.get(fen, [])
+                    weights = []
+                    
+                    if isinstance(db_data, list) and len(db_data) > 0 and isinstance(db_data[0], tuple):
+                        # Costruiamo un dizionario "Mossa: Numero di giocate"
+                        counts_dict = {san: count for san, count, pct in db_data}
+                        for v_m in valid_moves:
+                            san_vm = board.san(v_m)
+                            # Se la mossa non è nel top db ma è valida, le diamo peso minimo 1
+                            weights.append(counts_dict.get(san_vm, 1)) 
+                            
+                        # Estraiamo a caso ma tenendo conto dei pesi!
+                        chosen_move = random.choices(valid_moves, weights=weights, k=1)[0]
+                    else:
+                        # Fallback se non c'è internet o il db non è ancora pronto
+                        chosen_move = random.choice(valid_moves)
+                    # -----------------------------------------------------------
+
                     is_capture = board.is_capture(chosen_move)
                     board.push(chosen_move)
                     play_sound("capture" if is_capture else "move")
@@ -372,14 +438,12 @@ def main():
                             board.push(last_move)
                             
                     elif event.key == pygame.K_r and current_state == "EDIT":
-                        fen = board.fen()
                         if fen in repertoires[chosen_color]:
                             del repertoires[chosen_color][fen]
                             save_repertoire()
                             system_msg = "All moves reset."
                             
                     elif event.key == pygame.K_h and current_state == "TRAIN":
-                        fen = board.fen()
                         current_moves = repertoires[chosen_color].get(fen, [])
                         if current_moves:
                             initials = ", ".join(list(set(m[0] for m in current_moves)))
@@ -441,7 +505,6 @@ def main():
                                             play_sound("capture" if is_capture else "move")
                                             system_msg = ""
                                         elif current_state == "TRAIN":
-                                            fen = board.fen()
                                             current_moves = repertoires[chosen_color].get(fen, [])
                                             if board.san(move) in current_moves:
                                                 board.push(move)
@@ -461,11 +524,9 @@ def main():
             infos = engine.analyse(board, chess.engine.Limit(time=0.2), multipv=3)
             top_moves_text = []
             
-            # Extract evaluation for the bar drawing
             if infos and "score" in infos[0]:
                 sc = infos[0]["score"].white()
                 if sc.is_mate():
-                    # If it's a mate, give the bar a very high value
                     eval_cp = 10000 if sc.mate() > 0 else -10000
                 else:
                     eval_cp = sc.score()
@@ -479,7 +540,6 @@ def main():
         if current_state == "MENU":
             draw_menu()
             if system_msg:
-                # Show in the menu how many PGNs were imported
                 msg_render = font_text.render(system_msg, True, (255, 255, 100))
                 screen.blit(msg_render, (WIDTH//2 - msg_render.get_width()//2, HEIGHT - 50))
         else:
