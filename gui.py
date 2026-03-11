@@ -83,7 +83,7 @@ def salva_repertorio():
         json.dump(repertori, f, indent=4)
 
 def importa_pgn(colore_scelto):
-    """Apre una finestra di dialogo Windows e converte un PGN nel nostro JSON, esplorando TUTTE le varianti."""
+    """Apre una finestra Windows e converte un PGN nel nostro JSON, esplorando TUTTE le varianti."""
     root = tk.Tk()
     root.withdraw()
     filepath = filedialog.askopenfilename(title=f"Importa PGN per {colore_scelto}", filetypes=[("File PGN", "*.pgn")])
@@ -92,41 +92,37 @@ def importa_pgn(colore_scelto):
         return "Importazione annullata."
         
     try:
-        conteggio = [0] # Usiamo una lista per tenerne traccia durante la ricorsione
+        conteggio = [0]
         
-        # Funzione ricorsiva per esplorare l'intero albero delle varianti
         def esplora_albero(nodo, board):
             for figlio in nodo.variations:
                 mossa = figlio.move
                 fen = board.fen()
                 mossa_san = board.san(mossa)
                 
-                # Salviamo la mossa se tocca al colore che stiamo importando
-                turno_attuale = "Bianco" if board.turn == chess.WHITE else "Nero"
-                if turno_attuale == colore_scelto:
-                    if fen not in repertori[colore_scelto]:
-                        repertori[colore_scelto][fen] = []
-                    if mossa_san not in repertori[colore_scelto][fen]:
-                        repertori[colore_scelto][fen].append(mossa_san)
-                        conteggio[0] += 1
+                # RIMOSSO IL CONTROLLO SUL TURNO! 
+                # Salviamo ogni singolo ramo dell'albero PGN per avere continuità
+                if fen not in repertori[colore_scelto]:
+                    repertori[colore_scelto][fen] = []
+                if mossa_san not in repertori[colore_scelto][fen]:
+                    repertori[colore_scelto][fen].append(mossa_san)
+                    conteggio[0] += 1
                         
-                # 1. Eseguiamo la mossa sulla scacchiera virtuale
+                # Navighiamo in profondità
                 board.push(mossa)
-                # 2. Esploriamo tutte le sotto-varianti di questa mossa (Ricorsione)
                 esplora_albero(figlio, board)
-                # 3. Annulliamo la mossa (Backtracking) per passare alla prossima variante
                 board.pop()
 
         with open(filepath, "r", encoding="utf-8") as pgn_file:
             while True:
                 game = chess.pgn.read_game(pgn_file)
-                if game is None: break # Fine del file
+                if game is None: break
                 
                 board = game.board()
-                esplora_albero(game, board) # Avviamo l'esplorazione profonda!
+                esplora_albero(game, board)
                 
         salva_repertorio()
-        return f"Importate {conteggio[0]} mosse da PGN!"
+        return f"Importate {conteggio[0]} mosse (inclusi gli avversari)!"
     except Exception as e:
         return f"Errore lettura PGN: {e}"
 
@@ -234,17 +230,45 @@ def disegna_pannello(stato, board, colore_scelto, top_mosse_testo, msg_sistema):
     
     fen = board.fen()
     mosse_salvate = repertori[colore_scelto].get(fen, [])
-    testo_salvate = ", ".join(mosse_salvate) if mosse_salvate else "Nessuna"
     
     if stato == "MODIFICA":
-        rep_testo = font_testo.render(f"Salvate: {testo_salvate}", True, (100, 255, 100) if mosse_salvate else (200, 200, 200))
-        screen.blit(rep_testo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 60))
+        # --- LOGICA MULTILINEA PER L'ANDATA A CAPO ---
+        colore_salvate = (100, 255, 100) if mosse_salvate else (200, 200, 200)
+        testo_completo = "Salvate: " + ", ".join(mosse_salvate) if mosse_salvate else "Salvate: Nessuna"
+            
+        parole = testo_completo.split(" ")
+        linee = []
+        linea_corrente = ""
+        max_larghezza = LARGHEZZA_PANNELLO - 40 # Margine di 20px per lato
+        
+        for parola in parole:
+            prova = linea_corrente + parola + " "
+            # Se la linea di prova ci sta nello spazio, la teniamo
+            if font_testo.size(prova)[0] <= max_larghezza:
+                linea_corrente = prova
+            else:
+                # Altrimenti salviamo la linea e andiamo a capo
+                linee.append(linea_corrente)
+                linea_corrente = parola + " "
+        if linea_corrente:
+            linee.append(linea_corrente)
+            
+        offset_y = 60 # Coordinata Y di partenza
+        for linea in linee:
+            surf = font_testo.render(linea.strip(), True, colore_salvate)
+            screen.blit(surf, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, offset_y))
+            offset_y += 25 # Scendiamo di 25 pixel per la riga successiva
+        
+        # --- FINE LOGICA MULTILINEA ---
+
+        # Spostiamo Stockfish in basso in base allo spazio occupato dalle mosse salvate
+        offset_stockfish = max(120, offset_y + 20) 
         
         sf_titolo = font_testo.render("Analisi Stockfish:", True, (150, 200, 255))
-        screen.blit(sf_titolo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 120))
+        screen.blit(sf_titolo, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, offset_stockfish))
         for i, riga in enumerate(top_mosse_testo):
             testo_mossa = font_piccolo.render(riga, True, COLORE_TESTO)
-            screen.blit(testo_mossa, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, 160 + (i * 25)))
+            screen.blit(testo_mossa, (LARGHEZZA_BARRA + LARGHEZZA_SCACCHIERA + 20, offset_stockfish + 35 + (i * 25)))
             
         istruzioni = ["[Click] Muovi", "[S] Salva mossa", "[R] Reset mosse qui", "[Backspace] Indietro", "[Esc] Menu"]
     else:
