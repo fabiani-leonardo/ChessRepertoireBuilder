@@ -257,7 +257,7 @@ def draw_highlights(board, selected_square, white_orientation=True):
         s.fill(HIGHLIGHT_COLOR)
         screen.blit(s, (EVAL_BAR_WIDTH + x * SQUARE_SIZE, y * SQUARE_SIZE))
 
-def draw_panel(state, board, chosen_color, top_moves_text, system_msg):
+def draw_panel(state, board, chosen_color, top_moves_data, system_msg):
     panel_rect = pygame.Rect(EVAL_BAR_WIDTH + BOARD_WIDTH, 0, PANEL_WIDTH, HEIGHT)
     pygame.draw.rect(screen, PANEL_COLOR, panel_rect)
     
@@ -268,7 +268,7 @@ def draw_panel(state, board, chosen_color, top_moves_text, system_msg):
     saved_moves = repertoires[chosen_color].get(fen, [])
     
     if state == "EDIT":
-        # Impaginazione mosse salvate
+        # --- Impaginazione mosse salvate ---
         saved_color = (100, 255, 100) if saved_moves else (200, 200, 200)
         full_text = "Saved: " + ", ".join(saved_moves) if saved_moves else "Saved: None"
         words = full_text.split(" ")
@@ -290,26 +290,43 @@ def draw_panel(state, board, chosen_color, top_moves_text, system_msg):
             screen.blit(surf, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, offset_y))
             offset_y += 25
         
-        # Disegno Stockfish
+        # --- Disegno Stockfish con Pallino Verde ---
         stockfish_offset = max(110, offset_y + 15) 
         sf_title = font_text.render("Stockfish Analysis:", True, (150, 200, 255))
         screen.blit(sf_title, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, stockfish_offset))
-        for i, line in enumerate(top_moves_text):
+        
+        for i, item in enumerate(top_moves_data):
+            # Estraiamo la mossa pura e il testo da stampare
+            san_move, line = item if isinstance(item, tuple) else ("", item)
+            
+            # DISEGNO DEL PALLINO VERDE (Stockfish)
+            if san_move in saved_moves:
+                dot_x = EVAL_BAR_WIDTH + BOARD_WIDTH + 10
+                dot_y = stockfish_offset + 30 + (i * 20) + 10 # Centrato verticalmente
+                pygame.draw.circle(screen, HIGHLIGHT_COLOR, (dot_x, dot_y), 4)
+                
             move_text = font_small.render(line, True, TEXT_COLOR)
             screen.blit(move_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, stockfish_offset + 30 + (i * 20)))
 
-        # NUOVO: Disegno Lichess Database (sotto Stockfish)
+        # --- Disegno Lichess Database con Pallino Verde ---
         lichess_offset = stockfish_offset + 105
         db_title = font_text.render("Lichess DB (Humans):", True, (255, 180, 100))
         screen.blit(db_title, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, lichess_offset))
         
         db_data = lichess_cache.get(fen, ["Caricamento..."])
         for i, item in enumerate(db_data[:4]): # Mostriamo max 4 mosse
-            if isinstance(item, tuple): # Se è un dato formattato
+            if isinstance(item, tuple): 
                 san, count, pct = item
                 testo = f"{i+1}. {san}  ({pct:.1f}%)"
+                
+                # DISEGNO DEL PALLINO VERDE (Lichess)
+                if san in saved_moves:
+                    dot_x = EVAL_BAR_WIDTH + BOARD_WIDTH + 10
+                    dot_y = lichess_offset + 30 + (i * 20) + 10
+                    pygame.draw.circle(screen, HIGHLIGHT_COLOR, (dot_x, dot_y), 4)
             else:
-                testo = item # Messaggio d'errore o caricamento
+                testo = item 
+                
             db_text = font_small.render(testo, True, TEXT_COLOR)
             screen.blit(db_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, lichess_offset + 30 + (i * 20)))
 
@@ -317,7 +334,8 @@ def draw_panel(state, board, chosen_color, top_moves_text, system_msg):
     else:
         info_text = font_text.render("Guess the move!", True, (150, 255, 150))
         screen.blit(info_text, (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 120))
-        instructions = ["[Click] Make move", "[H] Hint", "[N] New Line", "[Esc] Menu"]
+        # Aggiunto il comando [E] alla lista qui sotto!
+        instructions = ["[Click] Make move", "[H] Hint", "[N] New Line", "[E] Edit from here", "[Esc] Menu"]
 
     pygame.draw.line(screen, (100, 100, 100), (EVAL_BAR_WIDTH + BOARD_WIDTH + 20, 480), (WIDTH - 20, 480))
     for i, line in enumerate(instructions):
@@ -355,7 +373,7 @@ def main():
     chosen_color = "White"
     selected_square = None
     last_analyzed_fen = ""
-    top_moves_text = ["Calculating..."]
+    top_moves_data = [("", "Calculating...")]
     system_msg = ""
     eval_cp = 0 
     
@@ -454,6 +472,10 @@ def main():
                         board.reset()
                         selected_square = None
                         system_msg = "New line started!"
+                    elif event.key == pygame.K_e and current_state == "TRAIN":
+                        current_state = "EDIT"
+                        selected_square = None
+                        system_msg = "Switched to Edit Mode!"
                             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
@@ -519,10 +541,10 @@ def main():
 
         if current_state in ["EDIT", "TRAIN"] and board.fen() != last_analyzed_fen:
             last_analyzed_fen = board.fen()
-            top_moves_text = ["Calculating..."]
+            top_moves_data = [("", "Calculating...")] # CAMBIATO IN TUPLA
             
             infos = engine.analyse(board, chess.engine.Limit(time=0.2), multipv=3)
-            top_moves_text = []
+            top_moves_data = [] # SVUOTIAMO LA LISTA
             
             if infos and "score" in infos[0]:
                 sc = infos[0]["score"].white()
@@ -535,7 +557,12 @@ def main():
                 if "score" in info and "pv" in info:
                     sc = info["score"].white()
                     val = f"M{sc.mate()}" if sc.is_mate() else f"{sc.score()/100.0:+.2f}"
-                    top_moves_text.append(f"{i+1}. {board.san(info['pv'][0])}  [{val}]")
+                    
+                    san_move = board.san(info['pv'][0]) # Estraiamo la mossa pura (es. 'e4')
+                    testo_formattato = f"{i+1}. {san_move}  [{val}]"
+                    
+                    # Aggiungiamo la tupla (Mossa Pura, Testo) alla lista
+                    top_moves_data.append((san_move, testo_formattato))
 
         if current_state == "MENU":
             draw_menu()
@@ -548,7 +575,7 @@ def main():
             draw_board()
             draw_highlights(board, selected_square, white_orientation)
             draw_pieces(board, white_orientation)
-            draw_panel(current_state, board, chosen_color, top_moves_text, system_msg)
+            draw_panel(current_state, board, chosen_color, top_moves_data, system_msg)
             
         pygame.display.flip()
         clock.tick(60)
