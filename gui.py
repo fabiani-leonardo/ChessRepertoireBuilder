@@ -113,7 +113,8 @@ def load_assets():
             IMAGES[symbol] = pygame.transform.scale(img, (SQUARE_SIZE, SQUARE_SIZE))
         except: pass
     
-    sound_files = {'move': 'move.mp3', 'capture': 'capture.mp3', 'error': 'error.mp3'}
+    # --- MODIFICA AUDIO CON I TUOI FILE ESATTI ---
+    sound_files = {'move': 'move.wav', 'capture': 'capture.mp3', 'error': 'illegal.mp3'}
     for name, file in sound_files.items():
         try:
             SOUNDS[name] = pygame.mixer.Sound(f"sounds/{file}")
@@ -353,6 +354,30 @@ def get_square_from_mouse(x, y, white_orientation):
     row = y // SQUARE_SIZE
     return chess.square(col if white_orientation else 7 - col, 7 - row if white_orientation else row)
 
+def draw_annotation(annotation, white_orientation):
+    """Disegna il simbolo di valutazione in alto a destra della casa."""
+    if annotation:
+        sq = annotation["square"]
+        col = chess.square_file(sq)
+        row = chess.square_rank(sq)
+        x = col if white_orientation else 7 - col
+        y = 7 - row if white_orientation else row
+
+        # Font in grassetto per il simbolo
+        font_simbolo = pygame.font.SysFont("arial", 22, bold=True)
+        testo_render = font_simbolo.render(annotation["text"], True, annotation["color"])
+        
+        # Bordino/Ombra nera per renderlo leggibile su qualsiasi sfondo/pezzo
+        testo_ombra = font_simbolo.render(annotation["text"], True, (0, 0, 0))
+
+        # Calcolo posizione: in alto a destra, con un po' di margine
+        pos_x = EVAL_BAR_WIDTH + (x * SQUARE_SIZE) + SQUARE_SIZE - testo_render.get_width() - 4
+        pos_y = (y * SQUARE_SIZE) + 4
+
+        # Disegniamo prima l'ombra spostata di 2 pixel, poi il testo colorato
+        screen.blit(testo_ombra, (pos_x + 2, pos_y + 2)) 
+        screen.blit(testo_render, (pos_x, pos_y))
+
 # --- MAIN LOOP ---
 def main():
     load_assets()
@@ -376,6 +401,18 @@ def main():
     top_moves_data = [("", "Calculating...")]
     system_msg = ""
     eval_cp = 0 
+
+    prev_eval_cp = 0
+    waiting_for_eval = False
+    turn_who_just_moved = None
+    square_to_annotate = None
+    last_annotation = None
+
+    # --- NUOVE VARIABILI PER ERRORE IN TRAINING ---
+    is_showing_wrong_move = False
+    wrong_move_timer = 0
+    # --------------------------------------------------------
+    
     
     while running:
         fen = board.fen()
@@ -437,6 +474,7 @@ def main():
                             board.pop()
                             system_msg = "Move undone."
                             selected_square = None
+                            last_annotation = None
                             
                     elif event.key == pygame.K_s and current_state == "EDIT":
                         if len(board.move_stack) > 0:
@@ -468,17 +506,25 @@ def main():
                             system_msg = f"Starts with: {initials}"
                         else:
                             system_msg = "No moves saved here."
+
                     elif event.key == pygame.K_n and current_state == "TRAIN":
                         board.reset()
                         selected_square = None
+                        last_annotation = None
                         system_msg = "New line started!"
+                        
                     elif event.key == pygame.K_e and current_state == "TRAIN":
                         current_state = "EDIT"
                         selected_square = None
+                        last_annotation = None
                         system_msg = "Switched to Edit Mode!"
                             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
+                    # --- IGNORA I CLICK SE STIAMO MOSTRANDO L'ERRORE ---
+                    if current_state == "TRAIN" and is_showing_wrong_move:
+                        continue
+                    # ---------------------------------------------------
                     x, y = event.pos
                     
                     if current_state == "MENU":
@@ -521,11 +567,19 @@ def main():
                                             move = chess.Move(selected_square, clicked_square, promotion=chess.QUEEN)
                                     
                                     if move in board.legal_moves:
+                                        # --- MEMORIZZA I DATI PER IL PALLINO ---
+                                        prev_eval_cp = eval_cp
+                                        turn_who_just_moved = board.turn
+                                        square_to_annotate = move.to_square
+                                        waiting_for_eval = True
+                                        last_annotation = None # Nascondiamo il vecchio simbolo
+                                        # ---------------------------------------
+                                        
                                         is_capture = board.is_capture(move)
                                         if current_state == "EDIT":
                                             board.push(move)
                                             play_sound("capture" if is_capture else "move")
-                                            system_msg = ""
+                                            # system_msg verrà aggiornato dopo l'analisi di Stockfish!
                                         elif current_state == "TRAIN":
                                             current_moves = repertoires[chosen_color].get(fen, [])
                                             if board.san(move) in current_moves:
@@ -533,8 +587,14 @@ def main():
                                                 play_sound("capture" if is_capture else "move")
                                                 system_msg = "Correct!"
                                             else:
-                                                play_sound("error")
-                                                system_msg = "Incorrect, try again."
+                                                # --- MAGIA: ESEGUIAMO COMUNQUE LA MOSSA ---
+                                                board.push(move)
+                                                play_sound("error") # Suonerà illegal.mp3
+                                                system_msg = "Incorrect..."
+                                                is_showing_wrong_move = True
+                                                # Impostiamo il timer a 1500 millisecondi (1.5 secondi)
+                                                wrong_move_timer = pygame.time.get_ticks() + 1500 
+                                                # ------------------------------------------
                                         selected_square = None
                                     else:
                                         selected_square = None
@@ -552,6 +612,49 @@ def main():
                     eval_cp = 10000 if sc.mate() > 0 else -10000
                 else:
                     eval_cp = sc.score()
+
+            if infos and "score" in infos[0]:
+                sc = infos[0]["score"].white()
+                if sc.is_mate():
+                    eval_cp = 10000 if sc.mate() > 0 else -10000
+                else:
+                    eval_cp = sc.score()
+                    
+            # --- CALCOLO E ASSEGNAZIONE DEL SIMBOLO SULLA SCACCHIERA ---
+            if waiting_for_eval:
+                # Calcoliamo quanti centipedoni ha perso chi ha appena mosso
+                if turn_who_just_moved == chess.WHITE:
+                    cp_loss = prev_eval_cp - eval_cp
+                else:
+                    cp_loss = eval_cp - prev_eval_cp
+                
+                if cp_loss >= 300:
+                    simbolo, colore = "??", (255, 50, 50)     # Rosso
+                elif cp_loss >= 100:
+                    simbolo, colore = "?", (255, 165, 0)      # Arancione (Mistake)
+                elif cp_loss >= 50:
+                    simbolo, colore = "?!", (255, 255, 100)   # Giallo
+                elif cp_loss <= -50:
+                    simbolo, colore = "!!", (94, 235, 255)    # Celeste
+                elif cp_loss <= 10:
+                    simbolo, colore = "!", (65, 105, 225)     # Blu
+                else:
+                    simbolo, colore = "ok", (100, 255, 100)   # Verde
+                    
+                # --- MODIFICA 5 (Parte A): Messaggi a schermo ---
+                diff_text = f" (Diff: {-cp_loss/100:+.2f})" if abs(cp_loss) < 5000 else ""
+                
+                if current_state == "EDIT":
+                    system_msg = f"{simbolo}{diff_text}"
+                elif current_state == "TRAIN" and system_msg == "Correct!":
+                    system_msg = f"Correct! {simbolo}"
+                elif current_state == "TRAIN" and is_showing_wrong_move:
+                    system_msg = f"Incorrect: {simbolo}{diff_text}" # Mostra il Blunder!
+                    
+                last_annotation = {"square": square_to_annotate, "text": simbolo, "color": colore}
+                waiting_for_eval = False
+                # ------------------------------------------------
+            # -----------------------------------------------------------
             
             for i, info in enumerate(infos):
                 if "score" in info and "pv" in info:
@@ -563,6 +666,16 @@ def main():
                     
                     # Aggiungiamo la tupla (Mossa Pura, Testo) alla lista
                     top_moves_data.append((san_move, testo_formattato))
+            
+        # --- MODIFICA 5 (Parte B): AUTO-UNDO PER MOSSE ERRATE IN TRAINING ---
+        if current_state == "TRAIN" and is_showing_wrong_move:
+            if pygame.time.get_ticks() >= wrong_move_timer:
+                if len(board.move_stack) > 0:
+                    board.pop()
+                is_showing_wrong_move = False
+                last_annotation = None
+                system_msg = "Try the correct move!"
+        # --------------------------------------------------------------------
 
         if current_state == "MENU":
             draw_menu()
@@ -575,6 +688,7 @@ def main():
             draw_board()
             draw_highlights(board, selected_square, white_orientation)
             draw_pieces(board, white_orientation)
+            draw_annotation(last_annotation, white_orientation)
             draw_panel(current_state, board, chosen_color, top_moves_data, system_msg)
             
         pygame.display.flip()
